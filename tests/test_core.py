@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import os
 
@@ -83,9 +84,9 @@ def test_train_step_matches_between_expanded_and_plain(bundle, old_rows):
     plain = load_checkpoint(os.path.join("checkpoints", "model.pt"))
     expanded = expand_bundle(load_checkpoint(os.path.join("checkpoints", "model.pt")), [NEW_COL])
 
-    out_plain = ModelService(plain).train_step(old_rows, labels)
+    out_plain = asyncio.run(ModelService(plain).train_step(old_rows, labels))[0]
     # 扩列模型喂同样的旧字段，vibration 缺省补 0
-    out_exp = ModelService(expanded).train_step(old_rows, labels)
+    out_exp = asyncio.run(ModelService(expanded).train_step(old_rows, labels))[0]
 
     assert abs(out_plain["loss_before"] - out_exp["loss_before"]) <= TOL
     assert abs(out_plain["loss_after"] - out_exp["loss_after"]) <= TOL
@@ -138,7 +139,7 @@ def test_new_readings_update_new_weights(bundle, old_rows):
     rows_with_vib = [{**row, NEW_COL: 0.37 * (i + 1)} for i, row in enumerate(old_rows)]
 
     before = expanded.model.fc1.weight.detach()[:, -1].clone()
-    ModelService(expanded).train_step(rows_with_vib, labels)
+    asyncio.run(ModelService(expanded).train_step(rows_with_vib, labels))
     after = expanded.model.fc1.weight.detach()[:, -1]
 
     assert torch.equal(before, torch.zeros_like(before))
@@ -197,7 +198,7 @@ def test_save_and_reload_roundtrip_supports_old_predict_and_retrain(bundle, old_
     expanded = expand_bundle(load_checkpoint(src), [NEW_COL])
     labels = [i % bundle.num_classes for i in range(len(old_rows))]
     rows_with_vib = [{**row, NEW_COL: 0.1 * (i - 3)} for i, row in enumerate(old_rows)]
-    ModelService(expanded).train_step(rows_with_vib, labels)
+    asyncio.run(ModelService(expanded).train_step(rows_with_vib, labels))
 
     v2_path = tmp_path / "model_v2.pt"
     save_checkpoint_atomic(expanded, str(v2_path))
@@ -214,7 +215,7 @@ def test_save_and_reload_roundtrip_supports_old_predict_and_retrain(bundle, old_
     # Adam step 保留，且可继续训练
     step_before = int(reloaded.optimizer.state[list(reloaded.model.parameters())[0]]["step"])
     assert step_before == 201  # 初始 200 步 + 保存前续训 1 步
-    result = ModelService(reloaded).train_step(rows_with_vib, labels)
+    result = asyncio.run(ModelService(reloaded).train_step(rows_with_vib, labels))[0]
     step_after = int(reloaded.optimizer.state[list(reloaded.model.parameters())[0]]["step"])
     assert step_after == step_before + 1
     assert result["step"] == step_after

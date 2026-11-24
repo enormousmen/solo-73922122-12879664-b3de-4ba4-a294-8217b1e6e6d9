@@ -16,6 +16,8 @@ os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("TORCH_NUM_THREADS", "1"
 os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("TORCH_NUM_THREADS", "1"))
 
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from .checkpoint import load_checkpoint
 from .schemas import (
@@ -27,8 +29,10 @@ from .schemas import (
     ReloadResponse,
     SaveRequest,
     SaveResponse,
+    SetValidationRequest,
     TrainRequest,
     TrainResponse,
+    ValidationStateResponse,
 )
 from .service import ModelService
 
@@ -92,14 +96,60 @@ def predict(req: PredictRequest) -> dict:
     return {"feature_names": svc.bundle.feature_names, "predictions": preds}
 
 
-@app.post("/train", response_model=TrainResponse)
-async def train(req: TrainRequest) -> dict:
+@app.post(
+    "/train",
+    response_model=TrainResponse,
+    responses={
+        409: {
+            "model": TrainResponse,
+            "description": "status=rejected（验证样本判对变判错）或 "
+            "status=conflict（试训期间验证集被替换），本批未生效",
+        }
+    },
+)
+async def train(req: TrainRequest) -> JSONResponse:
     svc = _svc()
     async with svc.lock:
         try:
-            return svc.train_step(req.instances, req.labels)
+            body, status_code = await svc.train_step(req.instances, req.labels)
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:  # 试训/校验内部失败：活动模型未提交，服务可继续
+            raise HTTPException(status_code=500, detail=f"训练失败（本批未生效）: {exc}") from exc
+    # 被拒/冲突时返回 409，响应体结构与成功时一致，便于调用方固定解析
+    return JSONResponse(status_code=status_code, content=jsonable_encoder(body))
+
+
+# ---- 验证集管理（逐条提交、整体替换、清空） -------------------------
+@app.put("/validation", response_model=ValidationStateResponse)
+async def set_validation(req: SetValidationRequest) -> dict:
+    """整体设置或替换本次运行的验证集。"""
+    svc = _svc()
+    try:
+        return await svc.set_validation([item.model_dump() for item in req.items])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/validation", response_model=ValidationStateResponse)
+async def append_validation(req: SetValidationRequest) -> dict:
+    """逐条追加拆检读数与质检员确认的故障类别。"""
+    svc = _svc()
+    try:
+        return await svc.append_validation([item.model_dump() for item in req.items])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/validation", response_model=ValidationStateResponse)
+def validation_state() -> dict:
+    return _svc().validation_state()
+
+
+@app.delete("/validation", response_model=ValidationStateResponse)
+async def clear_validation() -> dict:
+    """清空验证集；之后 /train 恢复为“照常续训”。"""
+    return await _svc().clear_validation()
 
 
 @app.post("/expand", response_model=ExpandResponse)

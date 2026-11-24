@@ -12,7 +12,8 @@ services:
       MODEL_DTYPE: float32
       TORCH_NUM_THREADS: "1"
     volumes:
-      # 旧检查点只读进入，新版本写到单独的可写目录
+      # 检查点目录挂载：容器内保存的新版本在宿主机同目录可见
+      # （验证集只存在于本次运行内存中，不写盘，重启后需重新提交）
       - ./checkpoints:/app/checkpoints
     restart: unless-stopped
     healthcheck:
